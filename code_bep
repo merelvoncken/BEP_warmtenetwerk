@@ -14,180 +14,99 @@ from scipy.spatial.distance import euclidean
 from shapely.geometry import Point
 from shapely.geometry import LineString
 from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
 
-#%% specificeren startpunt en maken graaf stratennetwerk
+#%%
+pointA=(50.971480, 5.805104)
 
-point=(50.941575, 5.799548)
-
-G = ox.graph_from_point((point), dist=300) #Verzamel informatie uit openstreetmap en zet in een graaf
+G = ox.graph_from_point(pointA, dist=10000, simplify=False) #Verzamel informatie uit openstreetmap en zet in een graaf
 G = ox.project_graph(G) #zet de coordinaten van de graaf om naar UTM
 ox.plot_graph(G,node_size=0) #plot de graaf 
 
-coord_street_nodes = {i:(G.nodes[i]['x'], G.nodes[i]['y']) for i in G.nodes()}
+nodes, _ = ox.graph_to_gdfs(G)
+coordinates = nodes[['y', 'x']].values
 
-# maken voorbereiding eulerize en plot de graaf
-length = {(i,j):dist(coord_street_nodes[i],coord_street_nodes[j]) for i,j in G.edges()}
-# Create a new dictionary with the correct format for set_edge_attributes
-edge_attributes = {(i, j, "weight"): value for (i, j), value in length.items()}
+# Specify the number of clusters (you can adjust this based on your needs)
+num_clusters = 5
 
-# Set edge attributes in the graph
-nx.set_edge_attributes(G, edge_attributes, 'weight')
+# Use KMeans clustering to cluster the street coordinates
+kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(coordinates)
 
- 
-G = G.to_undirected() #maak graaf undirected
-G3 = nx.eulerize(G) #maak extra lijnen in de graaf om elke knoop evenveel graden te geven 
+# Add cluster labels to the nodes DataFrame
+nodes['cluster'] = kmeans.labels_
 
-nx.draw_networkx_nodes(G3,coord_street_nodes,node_color='red',node_size=50)
-for i,j,k in G3.edges(keys=True):
-    nx.draw_networkx_edges(G3,coord_street_nodes, edgelist=[(i,j)],
-                           connectionstyle=("Arc3,rad="+str(0.2*k)),
-                           arrows=True)
+fig, ax = ox.plot_graph(G, node_size=0, show=False, close=False)
+for cluster in range(num_clusters):
+    cluster_nodes = nodes[nodes['cluster'] == cluster]
+    ax.scatter(cluster_nodes['x'], cluster_nodes['y'], label=f'Cluster {cluster + 1}')
+
+plt.legend()
 plt.show()
+#%% Voorbereiden euclidean
 
+lengte={}
+edge_attributes={}
+coord_street_nodes={}
 
-
-#%% maak eulercircuit
-if nx.is_eulerian(G3):
-    G4 = list(nx.eulerian_circuit(G3))
+for i in G.nodes():
+    coord_street_nodes[i]=G.nodes[i]["x"], G.nodes[i]['y']
     
-#maak nieuwe graaf van het euler circuit    
+for i,j in G.edges():
+    lengte[(i,j)]=(dist(coord_street_nodes[i],coord_street_nodes[j]))
+    
+edge_attributes = {(i, j, "weight"): value for (i, j), value in lengte.items()}
+
+G = G.to_undirected() #maak graaf undirected
+
+#%% voeg edges toe aan losse graven per cluster
+cluster_0=nx.Graph()
+cluster_1=nx.Graph()
+cluster_2=nx.Graph()
+cluster_3=nx.Graph()
+cluster_4=nx.Graph()
+cluster_lst=[cluster_0,cluster_1,cluster_2,cluster_3, cluster_4]
+
+for u,v,w in G.edges:
+    cluster_u = nodes.at[u, 'cluster']
+    cluster_v = nodes.at[v, 'cluster']
+    if max(cluster_u, cluster_v)==0:
+        cluster_0.add_node(u)
+        cluster_0.add_node(v)
+        cluster_0.add_edge(u,v)
+    if max(cluster_u, cluster_v)==1:
+        cluster_1.add_node(u)
+        cluster_1.add_node(v)
+        cluster_1.add_edge(u,v)
+    if max(cluster_u, cluster_v)==2:
+        cluster_2.add_node(u)
+        cluster_2.add_node(v)
+        cluster_2.add_edge(u,v)
+    if max(cluster_u, cluster_v)==3:
+        cluster_3.add_node(u)
+        cluster_3.add_node(v)
+        cluster_3.add_edge(u,v)
+    if max(cluster_u, cluster_v)==4:
+        cluster_4.add_node(u)
+        cluster_4.add_node(v)
+        cluster_4.add_edge(u,v)
+
+        
+nx.draw_networkx(cluster_0, coord_street_nodes, node_size=3, with_labels=False)
+
+#%% Maak een euler pad per cluster en voeg deze circuits toe aan een graaf
+
 U=nx.Graph()
 
-# Voeg knooppunten toe
-U.add_nodes_from(G.nodes())
-
-U.add_edges_from(G4)
-
-#%% teken het euler circuit met dubbele lijnen
-nx.draw_networkx_nodes(U,coord_street_nodes,node_color='red',node_size=50)
-for i,j,k in U.edges(keys=True):
-    nx.draw_networkx_edges(U,coord_street_nodes, edgelist=[(i,j)],
-                           connectionstyle=("Arc3,rad="+str(0.2*k)),
-                           arrows=True)
-plt.show()
-#%% teken eulercircuit
-nx.draw_networkx_edges(G3,coord_street_nodes)
-nx.draw_networkx_nodes((G3),coord_street_nodes,node_size=5,node_color='black')
-plt.show()
+for i in cluster_lst:
+    i = nx.eulerize(i) #maak extra lijnen in de graaf om elke knoop evenveel graden te geven 
     
 
-#%% plotten graaf met pijltjes
-# Step 3: Plot the graph
-pos = nx.spring_layout(U)
-nx.draw_networkx(U, coord_street_nodes, with_labels=False, node_size=0)
+    # maak eulercircuit
+    if nx.is_eulerian(i):
+        EU = list(nx.eulerian_circuit(i))
+        
+    U.add_nodes_from(i.nodes())
 
-# Highlight the Eulerian path
-path_edges = list(zip(U, U[1:]))
-nx.draw_networkx_edges(U, coord_street_nodes, edgelist=path_edges, edge_color='red', width=2)
+    U.add_edges_from(EU)
 
-
-#%% gebouwen vinden in invoegen in graaf
-U2=U.copy()
-
-buildings = ox.features_from_point(point,tags={'building':True}, dist=200) #vind alle gebouwen in Beek
-#ox.plot_footprints(buildings) #plot alle gebouwen in beek
-buildings = ox.project_gdf(buildings) #zet locatie in UTM
-centroids = buildings.centroid #pak een central locati voor elk gebouw
-#print(centroids)
-
-x = list(centroids.x)
-y = list(centroids.y)
-
-import matplotlib.pyplot as plt 
-
-plt.scatter(x,y,s=1) #plot gebouwen in Beek
-
-coord_buildings = {i[1]:(c.x,c.y) for i,c in zip(buildings.index,buildings.centroid)}
-U.add_nodes_from(coord_buildings.keys())
-
-#%% verbinden nieuwe gebouwen aan bestaande graaf-> bewaren voor eindresultaten
-
-coord = coord_street_nodes|coord_buildings
-
-
-coord = coord_street_nodes|coord_buildings
-loc_buildings = list(coord_buildings.values())
-loc_street_nodes = list(coord_street_nodes.values())
-
-U2 = U.copy()
-
-edge_list = list(U2.edges())
-node_label = 0
-
-#Loop through all buildings by their indicator and coordinates
-for b,bc in coord_buildings.items():
-
-#FIND NEAREST EDGE
-#Define a point by the building coordinates
-    point = Point(*bc)
-#Compute the distance for this point to each edge in the edge list
-    dist = {(i,j):LineString([coord[i],coord[j]]).distance(point) for i,j in edge_list}
-#Find the key of the minimum distance in this dictionary 
-    i,j = min(dist, key=dist.get)
-
-#UPDATE NETWORK
-#Add new edges between end nodes and projection point and projection point and building 
-    U2.add_edges_from([(b,node_label),(i,node_label),(j,node_label)])
-#Remove the old edge from the network
-    U2.remove_edge(i,j)
-
-#UPDATE EDGE LIST
-#Add this new edge to the edge list
-    edge_list += [(i,node_label),(j,node_label)]
-#Remove the old edge from the edge list
-    edge_list.remove((i,j))
-
-#FIND PROJECTION POINT
-#Define line for nearest edge
-    line = LineString([coord[i],coord[j]])
-#Find length between project point and first end node
-    length = line.project(point)
-#Find coordinates of projection point
-    coord[node_label]=list(line.interpolate(length).coords)[0]
-    
-#UPDATE NODE LABEL
-    node_label += 1
-
-#%% tekenen nieuwe graaf
-nx.draw_networkx_edges(U2,coord)
-nx.draw_networkx_nodes(U2,coord,nodelist=list(coord_buildings.keys()),node_color='r',node_size=2)
-plt.show()
-   
-#%% bepaal warmte vraag per huis
-warmtevraag_huis_lst=[]
-total_surface=0
-for i in range(len(buildings.start_date)):
-    if int(buildings.start_date[i])<1900:
-        warmtevraag_m2=140 #de warmtevraag in W/M2
-    if int(buildings.start_date[i])>=1900 and int(bouwjaar[i])<1950:
-        warmtevraag_m2=120 #de warmtevraag in W/M2
-    if int(buildings.start_date[i])>= 1950 and int(bouwjaar[i])<2000:
-        warmtevraag_m2=100 #de warmtevraag in W/M2
-    if int(buildings.start_date[i])>=2000:
-        warmtevraag_m2=80 #de warmtevraag in W/M2
-    warmtevraag_huis=warmtevraag_m2*buildings.area[i]
-    warmtevraag_huis_lst.append(warmtevraag_huis)
-    
-
-
-#%% bepaal de lengte van de leidingen
-total_len=0
-
-for x,y in U2.edges(): #bepaal de totale lengte van het de leidingen
-    #print(x,y)
-    coord_x=coord[x]
-    coord_y=coord[y]
-    total_len+= euclidean(coord_x, coord_y)
-    
-    
-print("de totale lengte is", total_len, "kilometer")
-
-
-
-#%% bepaal de kosten van de leidingen
-kosten_pm=10
-beta=0.6
-tot_lengte= total_len
-Capaciteit=100
-kosten=kosten_pm*tot_lengte*(Capaciteit)**beta #bepaald de kosten van het aanleggen van de leiding
-print("de totale kosten zijn", kosten, "euro")
+nx.draw_networkx(U, coord_street_nodes, node_size=1, with_labels=False)
