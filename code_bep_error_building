@@ -1,0 +1,273 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov  2 12:40:52 2023
+
+@author: merel
+"""
+#%%importeren van technieken
+
+import osmnx as ox
+import networkx as nx
+import matplotlib.pyplot as plt
+from math import dist
+from scipy.spatial.distance import euclidean
+from shapely.geometry import Point
+from shapely.geometry import LineString
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import numpy as np
+import pandas as pd
+import utm
+
+
+#%% invoerwaarde
+pointA=(50.971480, 5.805104) #de centrale coordinaten waarvanuit de graaf opgezet gaat worden, in dit geval de naftakraker 4 van sabic
+distance=500
+num_clusters=5 #het aantal clusters waarin de graaf verdeeld zal worden
+
+
+#%% Plot de graaf en maak verschillende clusters
+
+
+Graaf = ox.graph_from_point(pointA, dist=distance, simplify=False) #Verzamel informatie uit openstreetmap en zet in een graaf
+Graaf = ox.project_graph(Graaf) #zet de coordinaten van de graaf om naar UTM
+ox.plot_graph(Graaf,node_size=0) #plot de graaf 
+
+nodes, _ = ox.graph_to_gdfs(Graaf)
+coordinates = nodes[['y', 'x']].values
+
+
+# Use KMeans clustering to cluster the street coordinates
+kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(coordinates)
+
+# Add cluster labels to the nodes DataFrame
+nodes['cluster'] = kmeans.labels_
+
+centers=kmeans.cluster_centers_ #bepaald de centrums van de clusters
+
+fig, ax = ox.plot_graph(Graaf, node_size=0, show=False, close=False)
+for cluster in range(num_clusters):
+    cluster_nodes = nodes[nodes['cluster'] == cluster]
+    ax.scatter(cluster_nodes['x'], cluster_nodes['y'], label=f'Cluster {cluster + 1}')
+
+plt.legend()
+plt.show()
+
+#%% Voorbereiden euclidean
+
+lengte={}
+edge_attributes={}
+coord_street_nodes={}
+counter=0
+
+for node in Graaf.nodes():
+    coord_street_nodes[node]=Graaf.nodes[node]["x"], Graaf.nodes[node]['y'] #voeg de coordinaten van alle nodes toe aan het coord_street_nodes
+
+for i,j in centers:
+    coord_street_nodes[counter]=(j,i) #voeg de centrum nodes toe aan coord_Street_nodes
+    counter+=1
+    
+for i,j in Graaf.edges():
+    lengte[(i,j)]=(dist(coord_street_nodes[i],coord_street_nodes[j])) #voeg de lengte toe aan de edges
+    
+edge_attributes = {(i, j, "weight"): value for (i, j), value in lengte.items()}
+
+Graaf = Graaf.to_undirected() #maak graaf undirected
+
+
+
+#%% voeg edges toe aan losse graven per cluster
+cluster_0=nx.Graph()
+cluster_1=nx.Graph()
+cluster_2=nx.Graph()
+cluster_3=nx.Graph()
+cluster_4=nx.Graph()
+cluster_lst=[cluster_0,cluster_1,cluster_2,cluster_3, cluster_4]
+
+for u,v,w in Graaf.edges:
+    cluster_u = nodes.at[u, 'cluster']
+    cluster_v = nodes.at[v, 'cluster']
+    if max(cluster_u, cluster_v)==0:
+        cluster_0.add_node(u)
+        cluster_0.add_node(v)
+        cluster_0.add_edge(u,v)
+    if max(cluster_u, cluster_v)==1:
+        cluster_1.add_node(u)
+        cluster_1.add_node(v)
+        cluster_1.add_edge(u,v)
+    if max(cluster_u, cluster_v)==2:
+        cluster_2.add_node(u)
+        cluster_2.add_node(v)
+        cluster_2.add_edge(u,v)
+    if max(cluster_u, cluster_v)==3:
+        cluster_3.add_node(u)
+        cluster_3.add_node(v)
+        cluster_3.add_edge(u,v)
+    if max(cluster_u, cluster_v)==4:
+        cluster_4.add_node(u)
+        cluster_4.add_node(v)
+        cluster_4.add_edge(u,v)
+        
+
+#%%voeg de centers toe aan de clusters
+
+centers_coord=[] #maak een lijst waarin de coordinaten van de centers goed in terug te vinden zijn
+for i,j in centers:
+    centers_coord.append((i,j))
+
+for cluster_num in range(0, 5): #kijk naar elke losse cluster
+    distance=1000000000000000000000
+    cluster_lst[cluster_num].add_node(cluster_num) #voeg de centrum node toe aan het cluster
+    for node in cluster_lst[cluster_num].nodes: #kijk door alle nodes van het cluster
+        distance_node=euclidean(coord_street_nodes[node], centers_coord[cluster_num]) #bepaald de afstand tussen de node en de centrum node
+        if distance_node<=distance and node!=cluster_num:   #controleer of de afstand tot de node kleiner is dan de korste afstand op dit moment
+            nearest_neighbour=node #maak de nieuwe node de nearest_neighbour
+    cluster_lst[cluster_num].add_edge(nearest_neighbour,cluster_num) #voeg en edge toe tussen de dichtsbijzijnste buur en de centrum node 
+
+#%% maak een de cluster compleet
+for cluster in cluster_lst: #voor elke cluster uit de clusterlijst
+    mapping={} #maak een lege dictionary aan, deze zal later gebruikt worden voor het hernoemen van de nodes
+    node_number=0 #dit is het nummer van de eerste node
+    #maak een mapping om later de nodes mee te kunnen hernoemen
+    for node in cluster.nodes: 
+        mapping[node_number]=node
+        node_number+=1
+    #maak een complete graaf met evenveel nodes als in cluster    
+    complete_graaf=nx.complete_graph(len(cluster.nodes()))
+    #hernoem de nodes
+    complete_graaf=nx.relabel_nodes(complete_graaf, mapping)      
+    
+    #geef de edges een attribuut weight die afhankelijk is van de afstand
+    for u,v in complete_graaf.edges():
+        complete_graaf[u][v]['weight'] = (dist(coord_street_nodes[u], coord_street_nodes[v]))    
+        #maak een minimaal opspannende boom aan en sorteer deze
+    msp= nx.minimum_spanning_tree(complete_graaf)
+    sorted_edges_msp=sorted(list(msp.edges))
+    #zolang dat de cluster niet volledig er gekeken worden of een van de takken van de minimaal opspannende boom al in de graaf zitten.
+    #wanneer dit waar is worden ze uit de minimaal opspannede boom gehaald, anders wordt de tak toegevoegd aan de cluster
+    while nx.is_connected(cluster)==False:
+        for u,v in sorted_edges_msp:
+             #Check if the edge is already in the graph
+            if cluster.has_edge(u, v):
+                msp.remove_edge(u,v)
+
+            else:
+                cluster.add_edge(u,v)
+                # If the edge is already in the graph, remove it from the list and consider the next shortest edge  
+    nx.draw_networkx(cluster, coord_street_nodes, node_size=3, with_labels=False)
+    plt.show()
+        
+
+#%% Maak een euler pad per cluster en voeg deze circuits toe aan een graaf
+
+U=nx.MultiGraph()
+
+for cluster in cluster_lst: #voor elke cluster in de cluster lijst 
+    cluster = nx.eulerize(cluster) #maak extra lijnen in de graaf om elke knoop evenveel graden te geven 
+    
+
+    # maak eulercircuit
+    if nx.is_eulerian(cluster):
+        EU = list(nx.eulerian_circuit(cluster))
+        
+    U.add_nodes_from(cluster.nodes(), cluster=cluster) #voeg de oorspronkelijke nodes toe aan de cluster
+
+    U.add_edges_from(EU) #voeg de lijnen toe aan de cluster
+
+nx.draw_networkx(U, coord_street_nodes, node_size=1, with_labels=False)
+
+#%% verbinden van de verschillende clusters met elkaar
+d1,d2,d3,d4 = utm.from_latlon(pointA[0],pointA[1]) #schrijf de coordinaten van de producent om in UTM
+pre_HC=nx.complete_graph(6) #maak een complete graaf
+coord_street_nodes[num_clusters]=(d1,d2) #voeg de producent toe aan coord_street_nodes
+graph_HC=nx.Graph() #maak een losse graaf voor het hamilton cicuit
+
+     
+for i,j in pre_HC.edges(): #geef alle edges een gewicht van de lengte van de edge
+    pre_HC[i][j]["weight"]= euclidean(coord_street_nodes[i],coord_street_nodes[j])
+    
+
+Hamilton=nx.approximation.greedy_tsp(pre_HC,source=0) #zoek het minimale hamilton cicuit
+Hamilton=nx.approximation.threshold_accepting_tsp(pre_HC, init_cycle=Hamilton) #zoek een beter minimaal hamilton circuit
+nx.add_cycle(graph_HC, Hamilton[:-1]) #voeg dit circuit toe aan de graaf graph_HC
+nx.draw_networkx(graph_HC, coord_street_nodes) #teken deze graaf
+plt.show()
+
+for node in range(0,(len(centers)+1)): #voeg voor elke cluster het middelpunt toe aan de graaf
+    U.add_node(node)
+nx.add_cycle(U, Hamilton[:-1])  #voeg het minimale hamilton circuit toe aan de graaf
+nodelist=range(0,num_clusters+1)
+
+nx.draw_networkx(U, coord_street_nodes, node_size=2, with_labels=False) #teken de graaf
+nx.draw_networkx_nodes(U,coord_street_nodes, nodelist=nodelist, node_size=10, node_color="red") #tekeken de centrum punten rood
+plt.show()
+
+#%% gebouwen vinden in invoegen in graaf
+U1=U.copy()
+pointA=(50.971480, 5.805104)
+
+
+buildings = ox.features_from_point(pointA,tags={'building':True}, dist=distance) #vind alle gebouwen in Beek
+ox.plot_footprints(buildings) #plot alle gebouwen in beek
+buildings = ox.project_gdf(buildings) #zet locatie in UTM
+centroids = buildings.centroid #pak een central locati voor elk gebouw
+
+coord_buildings = {i[1]:(c.x,c.y) for i,c in zip(buildings.index,buildings.centroid)}
+                                                 
+                                               
+U1.add_nodes_from(coord_buildings.keys())
+coord = coord_street_nodes|coord_buildings
+#%%
+nx.draw_networkx_edges(U1,coord)
+nx.draw_networkx_nodes(U1,coord,nodelist=list(coord_buildings.keys()),node_color='r',node_size=1)
+
+
+#%% tekenen nieuwe graaf
+nx.draw_networkx_edges(U1,coord_street_nodes)
+nx.draw_networkx_nodes(U1,coord_street_nodes,nodelist=list(coord_buildings.keys()),node_color='r',node_size=2)
+plt.show()
+#%%
+print(buildings.start_date[50])
+   
+#%% bepaal warmte vraag per huis
+warmtevraag_huis_dic={} #maak een lege lijst om de warmtevraag per huis in op te slaan
+for i in range(len(buildings.nodes)): #ga elk gebouw langs uit de lijst
+     if pd.isnull(buildings.start_date[i])==False:
+        if int(buildings.start_date[i])<1920: #controleer of het gebouw voor 1920 gebouwd is
+            warmtevraag_m2=140 #de warmtevraag in W/M2
+        if int(buildings.start_date[i])>=1920 and int(buildings.start_date[i])<1974: #controleer of het gebouw tussen 1900 en 1950 gebouwd is
+            warmtevraag_m2=120 #de warmtevraag in W/M2
+        if int(buildings.start_date[i])>= 1975 and int(buildings.start_date[i])<2000: #controleer of het gebouw tussen 1950 en 2000 gebouwd is
+            warmtevraag_m2=100 #de warmtevraag in W/M2
+        if int(buildings.start_date[i])>=2000: #controleer of het gebouw na 2000 gebouwd is
+            warmtevraag_m2=80 #de warmtevraag in W/M2
+     else: 
+         warmtevraag_m2=110
+     warmtevraag_huis=warmtevraag_m2*buildings.area[i] #bepaal de warmtevraag van het huis door de oppervlakte te vermenigvuldigen met de wasrmtevraag per m^2
+     warmtevraag_huis_dic[i]=warmtevraag_huis #voeg de warmtevraag toe aan een lijst
+
+
+totale_warmtevraag=sum(warmtevraag_huis_dic.keys())
+print(totale_warmtevraag)
+#%% bepaal de lengte van de leidingen
+total_lengte=0
+
+for x,y in U1.edges(): #bepaal de totale lengte van het de leidingen
+    coord_x=coord[x] #bepaald de coordinaten van punt x
+    coord_y=coord[y] #bepaal de coordinaten van punt Y
+    total_lengte+= euclidean(coord_x, coord_y) #voeg de lengte tussen de twee punten toe aan de totale lengte
+    
+    
+print("de totale lengte is", total_lengte, "kilometer")
+
+
+
+#%% bepaal de kosten van de leidingen
+kosten_pm=10 #de kosten van het aanleggen van een leiding per meter
+beta=0.6 #de factor beta die bepaald hoe veel invloed de capaciteit heeft op de ksoten van het aanleggen van de leiding
+Capaciteit=100 #de capaciteit van de leiding in m^3 per uur
+kosten=kosten_pm*total_lengte*(Capaciteit)**beta #bepaald de kosten van het aanleggen van de leiding
+print("de totale kosten zijn", kosten, "euro")
+
+
+
